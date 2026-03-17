@@ -4,3 +4,7 @@ compatibility_date = "2024-12-01"
 
 [vars]
 ALLOWED_ORIGIN = "https://mikedbennett10-glitch.github.io"
+
+[[kv_namespaces]]
+binding = "TOMMY_KV"
+id = "cba22b16afcf49528aa82d286af8ed2c"

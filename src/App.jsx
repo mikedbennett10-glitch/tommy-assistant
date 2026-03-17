@@ -11,6 +11,7 @@ const THEME = {
   textDim: '#8888A0',
   accent: '#6C5CE7',
   error: '#EF4444',
+  green: '#4ADE80',
 }
 
 const API_URL_KEY = 'tommy_api_url'
@@ -19,59 +20,31 @@ function getApiUrl() {
   return localStorage.getItem(API_URL_KEY) || ''
 }
 
-// Parse SSE stream from Anthropic's Messages API
-async function streamResponse(apiUrl, messages, onChunk, onDone, onError) {
-  const controller = new AbortController()
+async function sendMessage(apiUrl, messages) {
+  const res = await fetch(apiUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages }),
+  })
 
-  try {
-    const res = await fetch(apiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages }),
-      signal: controller.signal,
-    })
-
-    if (!res.ok) {
-      const errText = await res.text()
-      throw new Error(`API error ${res.status}: ${errText}`)
-    }
-
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() || ''
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        const data = line.slice(6).trim()
-        if (data === '[DONE]') continue
-
-        try {
-          const parsed = JSON.parse(data)
-          if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-            onChunk(parsed.delta.text)
-          }
-        } catch {
-          // skip unparseable lines
-        }
-      }
-    }
-
-    onDone()
-  } catch (err) {
-    if (err.name !== 'AbortError') {
-      onError(err.message)
-    }
+  if (!res.ok) {
+    const errText = await res.text()
+    throw new Error(`API error ${res.status}: ${errText}`)
   }
 
-  return controller
+  const data = await res.json()
+  if (data.error) throw new Error(data.error)
+  return data.text
+}
+
+async function checkCalendarStatus(apiUrl) {
+  try {
+    const res = await fetch(`${apiUrl}/oauth/status`)
+    const data = await res.json()
+    return data.connected
+  } catch {
+    return false
+  }
 }
 
 const styles = {
@@ -117,8 +90,20 @@ const styles = {
   headerRight: {
     display: 'flex',
     alignItems: 'center',
-    gap: 12,
+    gap: 10,
   },
+  iconBtn: (active) => ({
+    background: 'none',
+    border: 'none',
+    color: active ? THEME.green : THEME.textDim,
+    fontSize: 18,
+    cursor: 'pointer',
+    padding: '4px 6px',
+    borderRadius: 6,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+  }),
   status: {
     fontSize: 12,
     color: THEME.textDim,
@@ -130,16 +115,8 @@ const styles = {
     width: 6,
     height: 6,
     borderRadius: '50%',
-    background: connected ? '#4ADE80' : THEME.textDim,
+    background: connected ? THEME.green : THEME.textDim,
   }),
-  settingsBtn: {
-    background: 'none',
-    border: 'none',
-    color: THEME.textDim,
-    fontSize: 18,
-    cursor: 'pointer',
-    padding: 4,
-  },
   messages: {
     flex: 1,
     overflowY: 'auto',
@@ -286,32 +263,76 @@ const styles = {
     fontWeight: 600,
     cursor: 'pointer',
   }),
+  calendarSection: {
+    marginTop: 20,
+    paddingTop: 16,
+    borderTop: `1px solid ${THEME.border}`,
+  },
+  calStatusRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 8,
+  },
+  calStatus: (connected) => ({
+    fontSize: 13,
+    color: connected ? THEME.green : THEME.textDim,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+  }),
+  connectBtn: {
+    padding: '6px 14px',
+    borderRadius: 8,
+    border: `1px solid ${THEME.border}`,
+    background: THEME.bg,
+    color: THEME.text,
+    fontSize: 13,
+    cursor: 'pointer',
+  },
 }
 
 const WELCOME = `Hello! I'm Tommy, your personal executive assistant.
 
 I can help you with:
-• Task management & prioritization
-• Scheduling & time blocking
+• Scheduling & calendar management
+• Task tracking & reminders
 • Quick notes & brainstorming
 • Research & summaries
-• Decision support & planning
 
-Tap the ⚙ icon to connect me to your AI backend, then let's get to work!`
+Tap ⚙ to connect your API, then 📅 to link your Google Calendar. Let's get to work!`
 
 const QUICK_ACTIONS = [
-  '📋 What should I focus on today?',
+  '📋 What\'s on my calendar today?',
   '✅ Help me plan a task',
   '📝 Quick note',
   '🔍 Research something for me',
 ]
 
-function SettingsModal({ onClose }) {
+function SettingsModal({ onClose, calendarConnected, onCalendarRefresh }) {
   const [url, setUrl] = useState(getApiUrl())
 
   const save = () => {
     localStorage.setItem(API_URL_KEY, url.trim())
     onClose()
+  }
+
+  const connectCalendar = () => {
+    const apiUrl = url.trim() || getApiUrl()
+    if (!apiUrl) {
+      alert('Set the Worker API URL first.')
+      return
+    }
+    window.open(`${apiUrl}/oauth/start`, '_blank', 'width=500,height=700')
+    // Poll for connection
+    const interval = setInterval(async () => {
+      const connected = await checkCalendarStatus(apiUrl)
+      if (connected) {
+        clearInterval(interval)
+        onCalendarRefresh()
+      }
+    }, 2000)
+    setTimeout(() => clearInterval(interval), 120000)
   }
 
   return (
@@ -327,9 +348,22 @@ function SettingsModal({ onClose }) {
           onKeyDown={(e) => e.key === 'Enter' && save()}
           autoFocus
         />
-        <div style={{ fontSize: 12, color: THEME.textDim, marginTop: 8 }}>
-          Enter the URL of your deployed Cloudflare Worker.
+
+        <div style={styles.calendarSection}>
+          <label style={styles.label}>Google Calendar</label>
+          <div style={styles.calStatusRow}>
+            <div style={styles.calStatus(calendarConnected)}>
+              <div style={styles.statusDot(calendarConnected)} />
+              {calendarConnected ? 'Connected' : 'Not connected'}
+            </div>
+            {!calendarConnected && (
+              <button style={styles.connectBtn} onClick={connectCalendar}>
+                Connect Calendar
+              </button>
+            )}
+          </div>
         </div>
+
         <div style={styles.modalBtns}>
           <button style={styles.modalBtn(false)} onClick={onClose}>Cancel</button>
           <button style={styles.modalBtn(true)} onClick={save}>Save</button>
@@ -346,21 +380,30 @@ export default function App() {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [calendarConnected, setCalendarConnected] = useState(false)
   const bottomRef = useRef(null)
   const inputRef = useRef(null)
 
-  const connected = !!getApiUrl()
+  const apiUrl = getApiUrl()
+  const connected = !!apiUrl
+
+  // Check calendar status on load
+  useEffect(() => {
+    if (apiUrl) {
+      checkCalendarStatus(apiUrl).then(setCalendarConnected)
+    }
+  }, [apiUrl])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  const send = useCallback((text) => {
+  const send = useCallback(async (text) => {
     const trimmed = (text || input).trim()
     if (!trimmed || loading) return
 
-    const apiUrl = getApiUrl()
-    if (!apiUrl) {
+    const currentApiUrl = getApiUrl()
+    if (!currentApiUrl) {
       setShowSettings(true)
       return
     }
@@ -372,40 +415,20 @@ export default function App() {
     setInput('')
     setLoading(true)
 
-    // Only send user/assistant messages (skip the initial welcome for API calls)
+    // Only send user/assistant messages (skip welcome and errors)
     const apiMessages = updatedMessages
-      .filter((_, i) => i > 0) // skip welcome message
+      .filter((m, i) => i > 0 && (m.role === 'user' || m.role === 'assistant') && m.content)
       .map((m) => ({ role: m.role, content: m.content }))
 
-    let assistantText = ''
-
-    // Add empty assistant message that we'll stream into
-    setMessages((prev) => [...prev, { role: 'assistant', content: '' }])
-
-    streamResponse(
-      apiUrl,
-      apiMessages,
-      (chunk) => {
-        assistantText += chunk
-        setMessages((prev) => {
-          const updated = [...prev]
-          updated[updated.length - 1] = { role: 'assistant', content: assistantText }
-          return updated
-        })
-      },
-      () => {
-        setLoading(false)
-        inputRef.current?.focus()
-      },
-      (error) => {
-        setMessages((prev) => {
-          // Remove the empty assistant message, add error
-          const updated = prev.slice(0, -1)
-          return [...updated, { role: 'error', content: error }]
-        })
-        setLoading(false)
-      },
-    )
+    try {
+      const responseText = await sendMessage(currentApiUrl, apiMessages)
+      setMessages((prev) => [...prev, { role: 'assistant', content: responseText }])
+    } catch (err) {
+      setMessages((prev) => [...prev, { role: 'error', content: err.message }])
+    } finally {
+      setLoading(false)
+      inputRef.current?.focus()
+    }
   }, [input, loading, messages])
 
   const handleKey = (e) => {
@@ -423,12 +446,21 @@ export default function App() {
           <span style={styles.logoText}>Tommy</span>
         </div>
         <div style={styles.headerRight}>
+          <button
+            style={styles.iconBtn(calendarConnected)}
+            onClick={() => {
+              if (!calendarConnected) setShowSettings(true)
+            }}
+            title={calendarConnected ? 'Calendar connected' : 'Connect calendar'}
+          >
+            📅
+          </button>
           <div style={styles.status}>
             <div style={styles.statusDot(connected)} />
-            {connected ? 'Connected' : 'Not configured'}
+            {connected ? 'Online' : 'Setup needed'}
           </div>
           <button
-            style={styles.settingsBtn}
+            style={styles.iconBtn(false)}
             onClick={() => setShowSettings(true)}
             title="Settings"
           >
@@ -448,7 +480,7 @@ export default function App() {
             </div>
           )
         })}
-        {loading && messages[messages.length - 1]?.content === '' && (
+        {loading && (
           <div style={styles.typing}>Tommy is thinking...</div>
         )}
         <div ref={bottomRef} />
@@ -481,7 +513,7 @@ export default function App() {
           ref={inputRef}
           style={styles.input}
           rows={1}
-          placeholder={connected ? 'Ask Tommy anything...' : 'Configure API in settings first...'}
+          placeholder={connected ? 'Ask Tommy anything...' : 'Configure API in settings...'}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKey}
@@ -496,7 +528,13 @@ export default function App() {
         </button>
       </div>
 
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {showSettings && (
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
+          calendarConnected={calendarConnected}
+          onCalendarRefresh={() => setCalendarConnected(true)}
+        />
+      )}
     </div>
   )
 }
